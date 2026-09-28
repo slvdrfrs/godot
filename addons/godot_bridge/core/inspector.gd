@@ -59,8 +59,8 @@ static func summary(n: Node, root: Node, props: Array = []) -> Dictionary:
 			groups.append(String(g))
 	if not groups.is_empty():
 		d["groups"] = groups
-	if n is CanvasItem or n is Node3D:
-		d["visible"] = n.visible
+	if (n is CanvasItem or n is Node3D) and not n.visible:
+		d["visible"] = false
 	if n.process_mode != Node.PROCESS_MODE_INHERIT:
 		d["process_mode"] = n.process_mode
 	for p in props:
@@ -69,13 +69,34 @@ static func summary(n: Node, root: Node, props: Array = []) -> Dictionary:
 	return d
 
 
-## Depth-limited tree. filters: {class_name, name_contains, group, script}. Returns {node, truncated, count}.
-static func tree(root: Node, depth: int = 4, props: Array = [], filters: Dictionary = {}, max_nodes: int = 500) -> Dictionary:
+## Depth-limited tree. filters: {class_name, name_contains, group, script} mark matches.
+## exclude_classes: nodes of these classes (is_class) are omitted from the output, along with their subtrees, but counted.
+## Returns {root, count, truncated, total_nodes, class_counts, excluded}.
+static func tree(root: Node, depth: int = 3, props: Array = [], filters: Dictionary = {}, max_nodes: int = 150, exclude_classes: Array = []) -> Dictionary:
 	if root == null:
 		return {"root": null, "count": 0}
-	var state := {"count": 0, "truncated": false}
+	var state := {"count": 0, "truncated": false, "excluded": 0, "exclude": exclude_classes}
 	var out := _tree_rec(root, root, depth, props, filters, max_nodes, state)
-	return {"root": out, "count": state["count"], "truncated": state["truncated"]}
+	var counts := {}
+	var total := 0
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_front()
+		total += 1
+		counts[n.get_class()] = counts.get(n.get_class(), 0) + 1
+		for c in n.get_children():
+			stack.append(c)
+	var result := {"root": out, "count": state["count"], "truncated": state["truncated"], "total_nodes": total, "class_counts": counts, "excluded": state["excluded"]}
+	if state["truncated"]:
+		result["hint"] = "output capped at max_nodes; narrow with root, depth, exclude_classes (see class_counts) or scene.find"
+	return result
+
+
+static func _excluded(n: Node, state: Dictionary) -> bool:
+	for c in state["exclude"]:
+		if n.is_class(c):
+			return true
+	return false
 
 
 static func _matches(n: Node, filters: Dictionary) -> bool:
@@ -100,14 +121,22 @@ static func _tree_rec(n: Node, root: Node, depth: int, props: Array, filters: Di
 		return null
 	var d := summary(n, root, props)
 	state["count"] += 1
-	d["matches"] = _matches(n, filters)
+	if not filters.is_empty():
+		d["matches"] = _matches(n, filters)
 	if depth > 0 and n.get_child_count() > 0:
 		var kids := []
+		var excluded_here := 0
 		for c in n.get_children():
+			if _excluded(c, state):
+				excluded_here += 1
+				state["excluded"] += 1
+				continue
 			var cd = _tree_rec(c, root, depth - 1, props, filters, max_nodes, state)
 			if cd != null:
 				kids.append(cd)
 		d["children_nodes"] = kids
+		if excluded_here > 0:
+			d["children_excluded"] = excluded_here
 	elif n.get_child_count() > 0:
 		d["children_omitted"] = true
 	return d
@@ -141,7 +170,7 @@ static func _property_default(n: Node, pname: StringName) -> Variant:
 static func inspect(n: Node, root: Node, opts: Dictionary = {}) -> Dictionary:
 	var d := summary(n, root)
 	var wanted: Variant = opts.get("properties", null)
-	var changed_only: bool = opts.get("changed_only", false)
+	var changed_only: bool = opts.get("changed_only", true)
 	var all_usage: bool = opts.get("all_usage", false)
 	var props := {}
 	var meta := {}
@@ -163,7 +192,7 @@ static func inspect(n: Node, root: Node, opts: Dictionary = {}) -> Dictionary:
 		props[pname] = Codec.encode(value)
 		meta[pname] = {"type": type_string(p["type"]), "class": p.get("class_name", ""), "hint": p.get("hint_string", ""), "usage": usage}
 	d["properties"] = props
-	if opts.get("meta", true):
+	if opts.get("meta", false):
 		d["property_meta"] = meta
 	if n is Node3D and n.is_inside_tree():
 		d["global_transform"] = Codec.encode(n.global_transform)

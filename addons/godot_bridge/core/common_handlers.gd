@@ -72,7 +72,7 @@ func scene_tree(p: Dictionary, _c: Dictionary) -> Variant:
 		if typeof(n) == TYPE_DICTIONARY:
 			return n
 		start = n
-	var t := Inspector.tree(start, int(p.get("depth", 4)), p.get("props", []), p.get("filters", {}), int(p.get("max_nodes", 500)))
+	var t := Inspector.tree(start, int(p.get("depth", 3)), p.get("props", []), p.get("filters", {}), int(p.get("max_nodes", 150)), p.get("exclude_classes", []))
 	t["scene_root"] = Codec.encode(r)
 	return t
 
@@ -129,9 +129,9 @@ func scene_call(p: Dictionary, _c: Dictionary) -> Variant:
 
 func exec_gdscript(p: Dictionary, _c: Dictionary) -> Variant:
 	if not exec_enabled:
-		return err("DISABLED", "exec.gdscript is disabled by project setting godot_bridge/allow_exec")
+		return err("DISABLED", "exec.gdscript is disabled (default). Enable it per project: Project Settings > Godot Bridge > Allow Exec (godot_bridge/allow_exec = true), then restart the editor/game. It runs unsandboxed GDScript in-process.")
 	var ctx := {"root": root(), "tree": host_node.get_tree(), "editor": is_editor, "host": host_node}
-	return await Exec.run(str(p.get("source", "")), p.get("args", {}), ctx)
+	return await Exec.run(str(p.get("source", "")), p.get("args", {}), ctx, int(p.get("soft_limit_ms", 2000)))
 
 
 func logs_get(p: Dictionary, _c: Dictionary) -> Variant:
@@ -160,7 +160,11 @@ func scene_patch(p: Dictionary, c: Dictionary) -> Variant:
 	if dry:
 		var preview := []
 		for pl in plan:
-			preview.append(pl["describe"])
+			var d: Dictionary = pl["describe"].call()
+			d.erase("value")
+			preview.append(d)
+			if (pl["kind"] == "create_node" or pl["kind"] == "instantiate_scene") and is_instance_valid(pl["node"]):
+				pl["node"].free() # created for validation only
 		return {"dry_run": true, "valid": true, "operations": preview}
 	return _apply_plan(plan, str(p.get("label", "Bridge patch by " + c["client_name"])), c)
 
@@ -369,7 +373,9 @@ static func _find_script_class(cls: String) -> Script:
 ## p: {mode: viewport|camera_preview|camera_takeover, camera?: ref, viewport?: ref, width?, height?, tree?: {depth, props}}
 func capture_observe(p: Dictionary, _c: Dictionary) -> Variant:
 	var mode := str(p.get("mode", "camera_preview" if p.has("camera") else "viewport"))
-	var size := Vector2i(int(p.get("width", 960)), int(p.get("height", 540)))
+	var size := Vector2i(int(p.get("width", 640)), int(p.get("height", 360)))
+	var fmt := str(p.get("format", "jpeg"))
+	var quality := clampf(float(p.get("quality", 0.7)), 0.05, 1.0)
 	var result: Dictionary
 	match mode:
 		"viewport":
@@ -393,6 +399,9 @@ func capture_observe(p: Dictionary, _c: Dictionary) -> Variant:
 			return err("INVALID", "Unknown mode " + mode)
 	if result.has("$error"):
 		return result
+	if mode == "viewport" and (p.has("width") or p.has("height")):
+		result = Capture.resize_result(result, size)
+	result = Capture.encode_result(result, fmt, quality)
 	if p.has("tree"):
 		var tp: Dictionary = p["tree"]
 		result["tree"] = Inspector.tree(root(), int(tp.get("depth", 3)), tp.get("props", []), tp.get("filters", {}), int(tp.get("max_nodes", 300)))

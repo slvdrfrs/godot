@@ -43,7 +43,7 @@ func _enter_tree() -> void:
 	_handlers.log_sink = _log_sink
 	_handlers.host_node = self
 	_handlers.is_editor = true
-	_handlers.exec_enabled = bool(ProjectSettings.get_setting(SETTING_EXEC, true))
+	_handlers.exec_enabled = bool(ProjectSettings.get_setting(SETTING_EXEC, false))
 	_handlers.register_editor()
 	_server.client_connected.connect(_on_client_connected)
 	_server.client_disconnected.connect(_on_client_disconnected)
@@ -67,7 +67,7 @@ func _exit_tree() -> void:
 
 func _ensure_settings() -> void:
 	_ensure_setting(SETTING_PORT, 6505, TYPE_INT, "Preferred loopback port for the bridge hub (falls back to the next free port)")
-	_ensure_setting(SETTING_EXEC, true, TYPE_BOOL, "Allow exec.gdscript (arbitrary GDScript from agents)")
+	_ensure_setting(SETTING_EXEC, false, TYPE_BOOL, "Allow exec.gdscript (arbitrary GDScript from agents; no sandbox, no timeout). Off by default.")
 	_ensure_setting(SETTING_RUNTIME, true, TYPE_BOOL, "Register the GodotBridgeRuntime autoload so F5 runs connect to the hub")
 
 
@@ -191,9 +191,14 @@ func _forward_to_run(client_id: int, text: String, target: String) -> void:
 		_server.send(client_id, JSON.stringify({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32001, "message": "UNAUTHORIZED: call bridge.hello first"}}))
 		return
 	var run_client := -1
+	var matches := 0
 	for id in runs.keys():
 		if target == "game" or target == "runtime" or runs[id]["run_id"] == target:
-			run_client = id # last connected wins for "game"
+			run_client = id
+			matches += 1
+	if matches > 1:
+		_server.send(client_id, JSON.stringify({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32000, "message": "AMBIGUOUS: %d game instances are connected; pass target=<run_id> (see runs)." % matches, "data": {"code": "AMBIGUOUS", "runs": runs_summary()}}}))
+		return
 	if run_client == -1:
 		_server.send(client_id, JSON.stringify({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32000, "message": "NO_RUN: no game instance connected (target=%s). Use run.start, then target 'game'." % target, "data": {"code": "NO_RUN", "runs": runs_summary()}}}))
 		return

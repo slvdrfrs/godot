@@ -33,7 +33,7 @@ func methods() -> Array:
 
 
 func on_client_connected(client_id: int) -> void:
-	clients[client_id] = {"name": "anonymous", "role": "agent", "authed": token == "", "connected_at": Time.get_ticks_msec(), "requests": 0, "run_id": ""}
+	clients[client_id] = {"name": "anonymous", "role": "agent", "authed": false, "connected_at": Time.get_ticks_msec(), "requests": 0, "run_id": ""}
 
 
 func on_client_disconnected(client_id: int) -> void:
@@ -122,8 +122,9 @@ func handle_text(client_id: int, text: String) -> void:
 		c = clients[client_id]
 	c["requests"] += 1
 	if method == "bridge.hello":
-		if token != "" and str(params.get("token", "")) != token:
-			_send.call(client_id, _rpc_error(id, -32001, "UNAUTHORIZED: bad or missing token (read it from .godot/godot_bridge.json)"))
+		# An empty server token is a misconfiguration: refuse everyone rather than trust everyone.
+		if token == "" or str(params.get("token", "")) != token:
+			_send.call(client_id, _rpc_error(id, -32001, "UNAUTHORIZED: bad or missing token (read it from .godot/godot_bridge.json, or GODOT_BRIDGE_TOKEN / user://godot_bridge_runtime.json for a listening game)"))
 			return
 		c["authed"] = true
 		c["name"] = str(params.get("client", "anonymous"))

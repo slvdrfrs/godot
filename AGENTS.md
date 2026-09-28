@@ -24,7 +24,9 @@ If the tools are missing, run `node bridge/dist/cli.js doctor --project <dir>`.
 
 - Node refs: prefer the `id` handles returned by the bridge (stable across renames); paths are relative to the scene root.
 - Values for properties: JSON numbers/arrays are coerced to the property type; `"Vector3(1, 2, 3)"` strings work too.
-- `godot_exec` (arbitrary GDScript) is an escape hatch. No sandbox, no timeout. Use structured tools when they exist.
+- `godot_exec` (arbitrary GDScript) is an escape hatch, off by default (`godot_bridge/allow_exec`). No sandbox, no timeout. Use structured tools when they exist.
+- With several game instances running, `target: "game"` returns `AMBIGUOUS`; pass the run id from `godot_status`.
+- Keep context small: `godot_tree` defaults (depth 3, 150 nodes) plus `exclude_classes`; `godot_observe` at 320x180 when a rough view is enough.
 - Two agents can share the editor. Mutations take a 30 s write lease per target; on `CONFLICT` wait for the holder or coordinate, do not `steal` unless the holder is clearly dead. Release your lease (`godot_lease action=release`) after a batch so the other agent can work.
 - Do not edit a `.tscn` on disk while it is open in the editor unless you `godot_scene action=reload` right after; the editor's copy wins on save.
 - Report honestly what you observed vs. what you inferred. The bridge labels every capture with a `guarantee`; keep that distinction in your own summaries.

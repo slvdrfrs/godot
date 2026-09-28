@@ -1,13 +1,15 @@
 extends RefCounted
-## Hot-compile and run a GDScript snippet in-process. Powerful escape hatch, no sandbox:
-## a runaway loop blocks the process, so it is gated by a project setting and off by default in exports.
+## Hot-compile and run a GDScript snippet in-process. Escape hatch with NO sandbox and NO preemption:
+## GDScript cannot be interrupted from inside the same process, so a runaway loop freezes the editor/game.
+## Gated by project setting godot_bridge/allow_exec (default false). Every response carries elapsed time
+## and a `warning` when the call exceeded `soft_limit_ms` (default 2000).
 
 const Codec := preload("res://addons/godot_bridge/core/codec.gd")
 
 
 ## `source` is the body of a function `run(ctx, args)`; or a full script if it starts with "extends".
 ## ctx = {"root": Node, "tree": SceneTree, "editor": bool}
-static func run(source: String, args: Dictionary, ctx: Dictionary) -> Dictionary:
+static func run(source: String, args: Dictionary, ctx: Dictionary, soft_limit_ms: int = 2000) -> Dictionary:
 	var script := GDScript.new()
 	var full := source
 	if not source.strip_edges().begins_with("extends") and not source.strip_edges().begins_with("@tool"):
@@ -26,4 +28,8 @@ static func run(source: String, args: Dictionary, ctx: Dictionary) -> Dictionary
 		return {"$error": {"code": "INVALID", "message": "Script must define func run(ctx, args)"}}
 	var t0 := Time.get_ticks_usec()
 	var result = await inst.run(ctx, args)
-	return {"result": Codec.encode(result), "elapsed_usec": Time.get_ticks_usec() - t0}
+	var elapsed := Time.get_ticks_usec() - t0
+	var out := {"result": Codec.encode(result), "elapsed_usec": elapsed, "sandbox": "none"}
+	if elapsed > soft_limit_ms * 1000:
+		out["warning"] = "exec took %d ms (> soft limit %d ms). The process was blocked for that long; there is no way to preempt GDScript. Move long work to run.step/scene.call or shorten the snippet." % [elapsed / 1000, soft_limit_ms]
+	return out

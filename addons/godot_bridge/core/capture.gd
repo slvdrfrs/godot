@@ -23,13 +23,42 @@ static func _image_result(img: Image, meta: Dictionary) -> Dictionary:
 		return {"$error": {"code": "UNSUPPORTED", "message": "Viewport produced an empty image. Rendering is unavailable (headless / dummy renderer) or the viewport has not drawn yet.", "data": meta}}
 	if img.get_format() != Image.FORMAT_RGBA8 and img.get_format() != Image.FORMAT_RGB8:
 		img.convert(Image.FORMAT_RGBA8)
-	var png := img.save_png_to_buffer()
 	meta["width"] = img.get_width()
 	meta["height"] = img.get_height()
 	meta["process_frame"] = Engine.get_process_frames()
 	meta["physics_frame"] = Engine.get_physics_frames()
 	meta["t_msec"] = Time.get_ticks_msec()
-	return {"image": {"mime": "image/png", "base64": Marshalls.raw_to_base64(png), "width": img.get_width(), "height": img.get_height()}, "meta": meta}
+	return {"_image": img, "meta": meta}
+
+
+## Downscale a viewport capture (viewport mode cannot pick the render size).
+static func resize_result(result: Dictionary, size: Vector2i) -> Dictionary:
+	var img: Image = result.get("_image")
+	if img != null and size.x > 0 and size.y > 0 and (img.get_width() > size.x or img.get_height() > size.y):
+		var scale := minf(float(size.x) / img.get_width(), float(size.y) / img.get_height())
+		img.resize(maxi(1, int(img.get_width() * scale)), maxi(1, int(img.get_height() * scale)), Image.INTERPOLATE_LANCZOS)
+		result["meta"]["resized_to"] = [img.get_width(), img.get_height()]
+	return result
+
+
+## Encode the captured Image as jpeg (default; ~5-10x smaller than png) or png.
+static func encode_result(result: Dictionary, fmt: String = "jpeg", quality: float = 0.7) -> Dictionary:
+	var img: Image = result.get("_image")
+	result.erase("_image")
+	if img == null:
+		return result
+	var bytes: PackedByteArray
+	var mime := "image/jpeg"
+	if fmt == "png":
+		bytes = img.save_png_to_buffer()
+		mime = "image/png"
+	else:
+		if img.get_format() != Image.FORMAT_RGB8:
+			img.convert(Image.FORMAT_RGB8)
+		bytes = img.save_jpg_to_buffer(quality)
+	result["image"] = {"mime": mime, "base64": Marshalls.raw_to_base64(bytes), "width": img.get_width(), "height": img.get_height(), "bytes": bytes.size()}
+	result["meta"]["format"] = fmt
+	return result
 
 
 static func viewport(vp: Viewport, extra: Dictionary = {}) -> Dictionary:

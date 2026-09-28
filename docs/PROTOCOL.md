@@ -10,13 +10,13 @@ Written when the hub starts, deleted on exit; a stale file (dead pid) is ignored
 {"jsonrpc":"2.0","id":1,"method":"bridge.hello","params":{"client":"claude","role":"agent","token":"<from discovery>"}}
 ```
 Game instances send `role: "runtime"` plus `run_id`, `pid`, `scene`. Until `bridge.hello` succeeds every other call is
-`UNAUTHORIZED`. The hub answers with `godot` version, `capabilities` and the list of `methods`.
+`UNAUTHORIZED`. A server with an empty token refuses every hello (misconfiguration is never open access). The hub answers with `godot` version, `capabilities` and the list of `methods`.
 
 ## Routing
 
-Any request whose `params.target` is `"game"`, `"runtime"` or a `run-<pid>` id is forwarded verbatim to that game instance
-(latest connected wins for `"game"`); the response is relayed back with the original id. Without `target` (or `"editor"`) the
-hub handles it.
+Any request whose `params.target` is `"game"`, `"runtime"` or a `run-<pid>` id is forwarded verbatim to that game instance;
+the response is relayed back with the original id. `"game"` with more than one connected instance fails with `AMBIGUOUS`
+(`data.runs` lists them). Without `target` (or `"editor"`) the hub handles it.
 
 ## Errors
 
@@ -59,6 +59,6 @@ Runtime only: `bridge.hello`, `bridge.status`, `run.pause`, `run.step`, `run.tim
 `attach_script {ref, script_path|null}`, `connect_signal {ref, signal, target, method, flags?, binds?}`, `disconnect_signal {...}`,
 `add_to_group {ref, group}`, `remove_from_group {ref, group}`. In the editor the whole batch is one `EditorUndoRedoManager` action.
 
-`capture.observe {mode, camera?, viewport?, width?, height?, tree?}` returns `{image: {mime, base64, width, height}, meta: {mode, guarantee, limitations[], camera_transform, projection, process_frame, physics_frame, consistency}, tree?}`.
+`capture.observe {mode, camera?, viewport?, width?=640, height?=360, format?=jpeg|png, quality?=0.7, tree?}` returns `{image: {mime, base64, width, height, bytes}, meta: {mode, guarantee, limitations[], camera_transform, projection, process_frame, physics_frame, consistency}, tree?}`.
 
 `run.step {count, clock: process|physics, events?[], capture?}` returns requested vs `observed_process_frames` / `observed_physics_frames` and a `guarantee` string.

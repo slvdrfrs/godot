@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { HubClient, BridgeError } from "./hub.js";
 import { runMcp } from "./mcp.js";
-import { install, codexToml } from "./install.js";
+import { install, uninstall, codexToml } from "./install.js";
 import { findProjectDir, readDiscovery, pidAlive, DISCOVERY_REL } from "./discovery.js";
 import { buildConsultPrompt, runCodex } from "./consult.js";
 
@@ -12,6 +12,7 @@ const USAGE = `godot-bridge <command> [options]
 Commands:
   mcp                         Run the MCP server on stdio (what Claude Code / Codex launch)
   install                     Copy the addon into a project, enable it, write .mcp.json (and Codex config with --write-codex)
+  uninstall                   Revert install exactly: addon dir, plugin + autoload + settings in project.godot, .mcp.json entry, Codex section
   status                      Print hub/editor status
   doctor                      Diagnose discovery, connection, capabilities
   call <method> [json]        Raw JSON-RPC call, e.g. call scene.tree '{"depth":2}'
@@ -24,7 +25,9 @@ Options:
   --project <dir>   Godot project directory (default: GODOT_PROJECT or walk up from cwd)
   --url <ws://...>  Connect to an explicit hub url (with --token)
   --client <name>   Client name shown in the editor (default: cli)
-  --no-claude / --no-codex / --write-codex   (install)
+  --no-claude / --no-codex / --write-codex   (install / uninstall)
+  --dry-run                   Show the diff instead of writing (install / uninstall)
+  --profile full|minimal      Tool set exposed by mcp (minimal = 12 core tools, fewer context tokens)
 `;
 
 function parseArgs(argv: string[]) {
@@ -53,12 +56,14 @@ async function main() {
 
   switch (cmd) {
     case "mcp":
-      await runMcp(hubOpts);
+      await runMcp({ ...hubOpts, profile: args.profile === "minimal" ? "minimal" : "full" });
       return;
-    case "install": {
+    case "install":
+    case "uninstall": {
       const dir = findProjectDir(projectDir ?? positional[1] ?? ".");
       if (!dir) throw new Error("No project.godot found; pass --project <dir>");
-      for (const line of install(dir, { claude: args["no-claude"] !== true, codex: args["no-codex"] !== true, writeCodex: args["write-codex"] === true })) console.log(line);
+      const o = { claude: args["no-claude"] !== true, codex: args["no-codex"] !== true, writeCodex: args["write-codex"] === true || cmd === "uninstall", dryRun: args["dry-run"] === true, profile: typeof args.profile === "string" ? args.profile : undefined, codexConfig: typeof args["codex-config"] === "string" ? args["codex-config"] : undefined };
+      console.log(cmd === "install" ? install(dir, o) : uninstall(dir, o));
       return;
     }
     case "codex-config": {

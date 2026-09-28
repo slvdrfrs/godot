@@ -22,6 +22,10 @@ GodotBridgeRuntime="*res://addons/godot_bridge/runtime/bridge_runtime.gd"
 
 run/main_run_args="--headless"
 
+[godot_bridge]
+
+allow_exec=true
+
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/godot_bridge/plugin.cfg")

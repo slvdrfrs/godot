@@ -7,7 +7,7 @@ Sustituye `<repo>` por la carpeta real. Necesitas Node 18+.
 ## 1. Construir el servidor MCP (una vez)
 
 ```powershell
-git clone https://github.com/slvdrfrs/godot C:\Users\Admin\Tools\godot-bridge
+git clone https://github.com/slvdrfrs/godot C:\Users\Admin\Tools\godot-bridge     # main = estable; -b claude/wizardly-fermi-tsuk2z = desarrollo
 cd C:\Users\Admin\Tools\godot-bridge\bridge
 npm ci
 npm run build
@@ -16,8 +16,13 @@ npm run build
 ## 2. Instalar en tu proyecto
 
 ```powershell
-node C:\Users\Admin\Tools\godot-bridge\bridge\dist\cli.js install --project <repo>\godot --write-codex
+node C:\Users\Admin\Tools\godot-bridge\bridge\dist\cli.js install --project <repo>\godot --write-codex --dry-run   # diff
+node C:\Users\Admin\Tools\godot-bridge\bridge\dist\cli.js install --project <repo>\godot --write-codex             # aplica
 ```
+
+Añade `--profile minimal` si quieres exponer solo las 12 tools centrales (2.564 tokens en vez de 4.028 por sesión).
+Para revertir: `uninstall --project <repo>\godot` (acepta `--dry-run`). Quita el addon, el plugin y el autoload de
+`project.godot`, los ajustes `godot_bridge/*`, la entrada `godot` de `.mcp.json` y la sección `[mcp_servers.godot]` de Codex.
 
 Hace cuatro cosas: copia `addons\godot_bridge` dentro de `<repo>\godot`, activa el plugin en `project.godot`, escribe
 `<repo>\godot\.mcp.json` (Claude Code) y añade `[mcp_servers.godot]` a `%USERPROFILE%\.codex\config.toml` (Codex).
@@ -60,6 +65,28 @@ node C:\Users\Admin\Tools\godot-bridge\bridge\dist\cli.js consult "Revisa mi pla
 ```
 
 Sin `codex` en el PATH imprime el prompt para pegarlo a mano. `--print` solo genera el prompt.
+
+## Tus tests headless y capturas (`--headless --path godot -- --selftest`, `--shot`)
+
+No se ven afectados. El autoload comprueba en `_ready` si el juego lo lanzó el editor (build de editor + sesión de depuración
+remota o `--editor-pid`, que solo pone el editor). Si no, retorna sin cargar ningún otro script, sin `set_process`, sin abrir
+sockets y sin imprimir. El e2e lo verifica en tres variantes (ejecución directa, con flags/env, y con `core/` ausente).
+`godot_exec` está apagado por defecto; para usarlo: Project Settings > Godot Bridge > Allow Exec.
+
+## Export a Steam (Windows)
+
+Opción A, recomendada: ejecuta `uninstall` antes de exportar y `install` después (dos comandos, sin rastro en el build).
+
+Opción B: deja el addon pero exclúyelo del paquete. En `export_presets.cfg`, en el preset de Windows:
+
+```ini
+exclude_filter="addons/godot_bridge/core/*, addons/godot_bridge/editor/*, addons/godot_bridge/plugin.gd, addons/godot_bridge/plugin.cfg, addons/godot_bridge/runtime/runtime_handlers.gd"
+```
+
+`runtime/bridge_runtime.gd` debe quedarse porque `project.godot` lo referencia como autoload; en el build es un nodo vacío que
+retorna en `_ready` (no hay build de editor, no hay `godot_bridge` en las features). Si además quieres quitar el autoload del
+build, elimina la línea `GodotBridgeRuntime=` de `[autoload]` antes de exportar (es lo que hace `uninstall`).
+Nunca añadas el feature tag `godot_bridge` a un preset que vaya a Steam: es el único interruptor que enciende el runtime en un export.
 
 ## Notas 4.7.x
 

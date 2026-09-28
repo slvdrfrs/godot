@@ -2,483 +2,194 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { HubClient, BridgeError } from "./hub.js";
 
-const Target = z
-  .enum(["editor", "game"])
-  .or(z.string().regex(/^run-\d+$/))
-  .default("editor")
-  .describe('"editor" = the scene open in the editor; "game" = the most recent running game instance (F5); or a run id like "run-1234" from godot_status.');
+// Descriptions are deliberately terse: every tool is loaded into each agent session. Details live in AGENTS.md.
 
-const NodeRef = z
-  .union([z.string(), z.object({ id: z.string() })])
-  .describe('Node reference: path relative to the scene root ("Player/Mesh"), absolute path ("/root/Main/Player"), "." for the root, or {"id": "<instance id>"} from a previous result (stable across renames).');
+const Target = z.enum(["editor", "game"]).or(z.string()).default("editor").describe("editor | game | run-<pid>");
+const NodeRef = z.union([z.string(), z.object({ id: z.string() })]).describe('path from scene root, "/root/..." or {id}');
+const Ev = z.record(z.any());
 
-const text = (v: unknown) => ({ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 1) });
+export type Profile = "full" | "minimal";
+/** minimal = the tools needed for the core loop; full adds files/project/selection/history/spatial/metrics/lease/exec/validate. */
+const MINIMAL = new Set(["godot_status", "godot_api", "godot_tree", "godot_inspect", "godot_find", "godot_patch", "godot_scene", "godot_run", "godot_step", "godot_input", "godot_observe", "godot_logs"]);
+
+const text = (v: unknown) => ({ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v) });
 
 function errorResult(e: any) {
   const err = e instanceof BridgeError ? { code: e.code, message: e.message, data: e.data } : { code: "UNKNOWN", message: String(e?.message ?? e) };
   return { isError: true, content: [text(err)] };
 }
 
-export function registerTools(server: McpServer, hub: HubClient) {
+function imageResult(r: any, extra: Record<string, any> = {}) {
+  const { image, ...rest } = r;
+  return { content: [{ type: "image" as const, data: image.base64, mimeType: image.mime }, text({ ...rest, ...extra, image: { w: image.width, h: image.height, bytes: image.bytes } })] };
+}
+
+export function registerTools(server: McpServer, hub: HubClient, profile: Profile = "full") {
   const call = async (method: string, params: Record<string, any> = {}, timeoutMs?: number) => {
     try {
-      const result = await hub.request(method, params, timeoutMs);
-      return { content: [text(result)] };
+      return { content: [text(await hub.request(method, params, timeoutMs))] };
     } catch (e) {
       return errorResult(e);
     }
   };
-  const withTarget = (target: string, params: Record<string, any>) => (target === "editor" ? params : { ...params, target });
+  const t = (target: string, params: Record<string, any>) => (target === "editor" ? params : { ...params, target });
+  const tool: typeof server.registerTool = (name, cfg, cb) => {
+    if (profile === "minimal" && !MINIMAL.has(name)) return undefined as any;
+    return server.registerTool(name, cfg, cb);
+  };
 
-  server.registerTool(
-    "godot_status",
-    {
-      title: "Godot status",
-      description:
-        "Connection + editor + running-game status: Godot version, renderer, edited scene, open scenes, connected agents, write leases, game runs, log capture availability. Call this first. target=game gives the runtime status (paused, frame counters, fps, window size).",
-      inputSchema: { target: Target },
-    },
-    async ({ target }) => {
-      try {
-        await hub.connect();
-      } catch (e) {
-        return errorResult(e);
-      }
-      const r = await call("bridge.status", withTarget(target, {}));
-      if ("isError" in r && r.isError) return r;
-      const parsed = JSON.parse((r.content[0] as any).text);
-      parsed.hub = { url: hub.discovery?.url, project_dir: hub.projectDir, client: hub.opts.clientName };
-      return { content: [text(parsed)] };
-    },
-  );
+  tool("godot_status", { description: "Editor/game status: version, edited scene, runs, agents, leases. Call first.", inputSchema: { target: Target } }, async ({ target }) => {
+    try {
+      await hub.connect();
+    } catch (e) {
+      return errorResult(e);
+    }
+    return call("bridge.status", t(target, {}));
+  });
 
-  server.registerTool(
+  tool(
     "godot_api",
     {
-      title: "Godot API ground truth",
-      description:
-        "Reflection of the exact engine build running in the editor (ClassDB) or of a project script. Use instead of guessing method names/signatures. Give class_name for a native class (methods, properties with defaults, signals, constants, enums), query to search class names, or script_path for a project GDScript/C# script (exports, methods, signals, class_name).",
-      inputSchema: {
-        class_name: z.string().optional().describe("Native class, e.g. CharacterBody3D"),
-        query: z.string().optional().describe("Substring to search class names"),
-        script_path: z.string().optional().describe("res://path/to/script.gd"),
-        member: z.string().optional().describe("Filter members by substring"),
-        inherited: z.boolean().default(false).describe("Include inherited members (can be large)"),
-        sections: z.array(z.enum(["methods", "properties", "signals", "constants", "enums"])).optional(),
-        target: Target,
-      },
+      description: "Exact API of this engine build. class_name -> members; query -> class search; script_path -> project script reflection.",
+      inputSchema: { class_name: z.string().optional(), query: z.string().optional(), script_path: z.string().optional(), member: z.string().optional().describe("substring filter"), inherited: z.boolean().default(false), sections: z.array(z.enum(["methods", "properties", "signals", "constants", "enums"])).optional(), target: Target },
     },
     async ({ class_name, query, script_path, member, inherited, sections, target }) => {
-      if (script_path) return call("api.script", withTarget(target, { path: script_path }));
-      if (class_name) return call("api.class", withTarget(target, { class_name, member: member ?? "", inherited, sections }));
-      return call("api.search", withTarget(target, { query: query ?? "", limit: 100 }));
+      if (script_path) return call("api.script", t(target, { path: script_path }));
+      if (class_name) return call("api.class", t(target, { class_name, member: member ?? "", inherited, sections }));
+      return call("api.search", t(target, { query: query ?? "", limit: 100 }));
     },
   );
 
-  server.registerTool(
+  tool(
     "godot_files",
-    {
-      title: "Project files (through the editor)",
-      description:
-        "list / read project files as the editor sees them (res:// paths), get resource dependencies, rescan the filesystem after editing files externally, or reimport assets. Prefer your own file tools for editing source; use rescan after external edits so the editor picks them up.",
-      inputSchema: {
-        action: z.enum(["list", "read", "dependencies", "rescan", "reimport"]),
-        dir: z.string().default("res://"),
-        path: z.string().optional(),
-        paths: z.array(z.string()).optional(),
-        exts: z.array(z.string()).optional().describe('e.g. ["tscn","gd"]'),
-        recursive: z.boolean().default(true),
-        limit: z.number().int().default(500),
-      },
-    },
+    { description: "Project files via the editor: list/read/dependencies/rescan/reimport.", inputSchema: { action: z.enum(["list", "read", "dependencies", "rescan", "reimport"]), dir: z.string().default("res://"), path: z.string().optional(), paths: z.array(z.string()).optional(), exts: z.array(z.string()).optional(), recursive: z.boolean().default(true), limit: z.number().int().default(300) } },
     async ({ action, dir, path, paths, exts, recursive, limit }) => {
-      switch (action) {
-        case "list":
-          return call("fs.list", { dir, exts: exts ?? [], recursive, limit });
-        case "read":
-          return call("fs.read", { path });
-        case "dependencies":
-          return call("fs.dependencies", { path });
-        case "rescan":
-          return call("fs.rescan");
-        case "reimport":
-          return call("fs.reimport", { paths: paths ?? [] });
-      }
+      if (action === "list") return call("fs.list", { dir, exts: exts ?? [], recursive, limit });
+      if (action === "read") return call("fs.read", { path });
+      if (action === "dependencies") return call("fs.dependencies", { path });
+      if (action === "rescan") return call("fs.rescan");
+      return call("fs.reimport", { paths: paths ?? [] });
     },
   );
 
-  server.registerTool(
+  tool(
     "godot_tree",
     {
-      title: "Scene tree",
-      description:
-        "Structured scene tree (ids, names, classes, scripts, groups, visibility, child counts) of the edited scene or of the running game. Depth-limited; pass props to include specific property values per node (e.g. [\"position\",\"visible\"]). filters mark matching nodes.",
-      inputSchema: {
-        target: Target,
-        root: NodeRef.optional().describe("Start from this node instead of the scene root"),
-        depth: z.number().int().min(0).max(32).default(4),
-        props: z.array(z.string()).default([]),
-        filters: z.object({ class_name: z.string().optional(), name_contains: z.string().optional(), group: z.string().optional(), script: z.string().optional() }).optional(),
-        max_nodes: z.number().int().default(500),
-      },
+      description: "Scene tree (ids, classes, scripts). Capped by depth/max_nodes; class_counts shows the rest. exclude_classes hides noisy subtrees (e.g. CollisionShape3D, Light3D).",
+      inputSchema: { target: Target, root: NodeRef.optional(), depth: z.number().int().min(0).max(32).default(3), max_nodes: z.number().int().default(150), exclude_classes: z.array(z.string()).default([]), props: z.array(z.string()).default([]).describe("extra properties per node"), filters: z.object({ class_name: z.string().optional(), name_contains: z.string().optional(), group: z.string().optional(), script: z.string().optional() }).optional() },
     },
-    async ({ target, root, depth, props, filters, max_nodes }) => call("scene.tree", withTarget(target, { root, depth, props, filters: filters ?? {}, max_nodes })),
+    async ({ target, root, depth, max_nodes, exclude_classes, props, filters }) => call("scene.tree", t(target, { root, depth, max_nodes, exclude_classes, props, filters: filters ?? {} })),
   );
 
-  server.registerTool(
+  tool(
     "godot_inspect",
-    {
-      title: "Inspect nodes",
-      description:
-        "Full inspection of one or more nodes: all editor/storage properties with types (or only the ones you name), global transform, script methods, signals and live signal connections. changed_only=true returns only properties that differ from the class default.",
-      inputSchema: {
-        target: Target,
-        refs: z.array(NodeRef).min(1),
-        properties: z.array(z.string()).optional().describe("Only these properties"),
-        changed_only: z.boolean().default(false),
-        methods: z.boolean().default(false),
-        signals: z.boolean().default(true),
-        connections: z.boolean().default(true),
-        meta: z.boolean().default(false).describe("Include type/hint/usage metadata per property"),
-      },
-    },
-    async ({ target, refs, properties, changed_only, methods, signals, connections, meta }) =>
-      call("scene.inspect", withTarget(target, { refs, properties, changed_only, methods, signals, connections, meta })),
+    { description: "Node properties (non-default by default), script members, signal connections.", inputSchema: { target: Target, refs: z.array(NodeRef).min(1), properties: z.array(z.string()).optional().describe("only these"), changed_only: z.boolean().default(true), methods: z.boolean().default(false), signals: z.boolean().default(false), connections: z.boolean().default(true), meta: z.boolean().default(false) } },
+    async ({ target, refs, ...rest }) => call("scene.inspect", t(target, { refs, ...rest })),
   );
 
-  server.registerTool(
-    "godot_find",
-    {
-      title: "Find nodes",
-      description: "Search nodes by class (is_class, so subclasses match), name substring, group or script path/class_name.",
-      inputSchema: {
-        target: Target,
-        class_name: z.string().optional(),
-        name_contains: z.string().optional(),
-        group: z.string().optional(),
-        script: z.string().optional(),
-        root: NodeRef.optional(),
-        limit: z.number().int().default(100),
-      },
-    },
-    async ({ target, ...rest }) => call("scene.find", withTarget(target, rest)),
-  );
+  tool("godot_find", { description: "Find nodes by class (subclasses match), name substring, group or script.", inputSchema: { target: Target, class_name: z.string().optional(), name_contains: z.string().optional(), group: z.string().optional(), script: z.string().optional(), root: NodeRef.optional(), limit: z.number().int().default(50) } }, async ({ target, ...rest }) => call("scene.find", t(target, rest)));
 
-  server.registerTool(
-    "godot_cameras",
-    {
-      title: "List cameras",
-      description: "All Camera3D/Camera2D nodes with current/enabled state, projection, effective 2D screen center, and which observe modes each supports.",
-      inputSchema: { target: Target },
-    },
-    async ({ target }) => call("scene.cameras", withTarget(target, {})),
-  );
+  tool("godot_cameras", { description: "List Camera3D/Camera2D nodes and their state.", inputSchema: { target: Target } }, async ({ target }) => call("scene.cameras", t(target, {})));
 
-  server.registerTool(
+  tool(
     "godot_observe",
     {
-      title: "Observe (render + state)",
-      description:
-        "SEE the scene: returns a PNG plus provenance metadata (camera transform/projection, frame counters, guarantee and limitations) and optionally the tree in the same iteration. Modes: viewport (exact pixels of the editor 3D/2D viewport or the game's main window), camera_preview (render from ANY Camera3D/Camera2D through an auxiliary viewport sharing the world; no CanvasLayers/UI), camera_takeover (make that camera current for one frame in its real viewport: exact composition, but a temporary mutation of the game). Fails with UNSUPPORTED when the editor runs headless.",
-      inputSchema: {
-        target: Target,
-        mode: z.enum(["viewport", "camera_preview", "camera_takeover"]).default("viewport"),
-        camera: NodeRef.optional().describe("Required for camera_* modes"),
-        viewport: z.enum(["3d", "3d_1", "3d_2", "3d_3", "2d"]).default("3d").describe("Editor only: which editor viewport"),
-        width: z.number().int().default(960),
-        height: z.number().int().default(540),
-        tree: z.object({ depth: z.number().int().default(3), props: z.array(z.string()).default([]) }).optional().describe("Also return the scene tree captured in the same iteration"),
-      },
+      description: "Render + provenance. viewport = editor/game viewport pixels; camera_preview = from any camera (no UI layers); camera_takeover = exact, mutates current camera 1 frame. Default 640x360 jpeg; use 320x180 to save tokens. UNSUPPORTED when headless.",
+      inputSchema: { target: Target, mode: z.enum(["viewport", "camera_preview", "camera_takeover"]).default("viewport"), camera: NodeRef.optional(), viewport: z.enum(["3d", "3d_1", "3d_2", "3d_3", "2d"]).default("3d"), width: z.number().int().default(640), height: z.number().int().default(360), format: z.enum(["jpeg", "png"]).default("jpeg"), quality: z.number().min(0.05).max(1).default(0.7), tree: z.object({ depth: z.number().int().default(2), props: z.array(z.string()).default([]) }).optional() },
     },
-    async ({ target, mode, camera, viewport, width, height, tree }) => {
+    async ({ target, ...rest }) => {
       try {
-        const r = await hub.request("capture.observe", withTarget(target, { mode, camera, viewport, width, height, tree }), 60000);
-        const { image, ...rest } = r;
-        return {
-          content: [
-            { type: "image" as const, data: image.base64, mimeType: image.mime },
-            text({ ...rest, image: { width: image.width, height: image.height } }),
-          ],
-        };
+        return imageResult(await hub.request("capture.observe", t(target, rest), 60000));
       } catch (e) {
         return errorResult(e);
       }
     },
   );
 
-  server.registerTool(
+  tool(
     "godot_spatial",
-    {
-      title: "Spatial queries",
-      description:
-        "Geometry helpers: bounds of a node (AABB / rect), project a world point to a camera pixel, unproject a pixel to a ray, or physics raycast from a camera pixel (hits CollisionObject3D shapes only, not visual geometry). pixel may be normalized 0..1 or absolute px.",
-      inputSchema: {
-        target: Target,
-        op: z.enum(["bounds", "project", "unproject", "raycast"]),
-        ref: NodeRef.optional(),
-        camera: NodeRef.optional(),
-        pixel: z.array(z.number()).length(2).optional(),
-        point: z.array(z.number()).length(3).optional(),
-        length: z.number().default(1000),
-        mask: z.number().int().optional(),
-        areas: z.boolean().default(false),
-      },
-    },
-    async ({ target, ...rest }) => call("spatial.query", withTarget(target, rest)),
+    { description: "bounds of a node; project/unproject via a Camera3D; physics raycast from a camera pixel (0..1 or px).", inputSchema: { target: Target, op: z.enum(["bounds", "project", "unproject", "raycast"]), ref: NodeRef.optional(), camera: NodeRef.optional(), pixel: z.array(z.number()).length(2).optional(), point: z.array(z.number()).length(3).optional(), length: z.number().default(1000), mask: z.number().int().optional(), areas: z.boolean().default(false) } },
+    async ({ target, ...rest }) => call("spatial.query", t(target, rest)),
   );
 
-  const Op = z.discriminatedUnion("op", [
-    z.object({ op: z.literal("set_property"), ref: NodeRef, property: z.string(), value: z.any(), expected_old: z.any().optional() }),
-    z.object({ op: z.literal("create_node"), parent: NodeRef.default("."), class_name: z.string(), name: z.string().optional(), properties: z.record(z.any()).optional(), script: z.string().optional() }),
-    z.object({ op: z.literal("instantiate_scene"), parent: NodeRef.default("."), scene_path: z.string(), name: z.string().optional() }),
-    z.object({ op: z.literal("remove_node"), ref: NodeRef }),
-    z.object({ op: z.literal("rename_node"), ref: NodeRef, name: z.string() }),
-    z.object({ op: z.literal("reparent_node"), ref: NodeRef, parent: NodeRef, index: z.number().int().optional(), keep_global_transform: z.boolean().default(true) }),
-    z.object({ op: z.literal("attach_script"), ref: NodeRef, script_path: z.string().nullable() }),
-    z.object({ op: z.literal("connect_signal"), ref: NodeRef, signal: z.string(), target: NodeRef, method: z.string(), flags: z.number().int().optional(), binds: z.array(z.any()).optional() }),
-    z.object({ op: z.literal("disconnect_signal"), ref: NodeRef, signal: z.string(), target: NodeRef, method: z.string() }),
-    z.object({ op: z.literal("add_to_group"), ref: NodeRef, group: z.string() }),
-    z.object({ op: z.literal("remove_from_group"), ref: NodeRef, group: z.string() }),
-  ]);
+  const Op = z
+    .object({ op: z.enum(["set_property", "create_node", "instantiate_scene", "remove_node", "rename_node", "reparent_node", "attach_script", "connect_signal", "disconnect_signal", "add_to_group", "remove_from_group"]) })
+    .passthrough()
+    .describe("set_property{ref,property,value,expected_old?} create_node{parent,class_name,name?,properties?,script?} instantiate_scene{parent,scene_path,name?} remove_node{ref} rename_node{ref,name} reparent_node{ref,parent,index?,keep_global_transform?} attach_script{ref,script_path|null} connect_signal{ref,signal,target,method,flags?,binds?} disconnect_signal{ref,signal,target,method} add_to_group/remove_from_group{ref,group}");
 
-  server.registerTool(
+  tool(
     "godot_patch",
-    {
-      title: "Patch scene (undoable)",
-      description:
-        'Apply structured edits to the edited scene (or to the live game with target=game). Editor patches are a single undoable action labelled with your client name. Values: plain JSON, "Vector3(1,2,3)"-style strings, or tagged {"$t":"Vector3","v":[1,2,3]}; numbers/arrays are coerced to the property type. Use dry_run to validate refs/classes first. Remember godot_scene save afterwards.',
-      inputSchema: {
-        target: Target,
-        operations: z.array(Op).min(1),
-        label: z.string().optional().describe("Undo history label"),
-        dry_run: z.boolean().default(false),
-      },
-    },
-    async ({ target, operations, label, dry_run }) => call("scene.patch", withTarget(target, { operations, label, dry_run })),
+    { description: 'Batch scene edits; in the editor one undoable action. Values: JSON, "Vector3(1,2,3)" or {"$t":..}. dry_run validates. Save with godot_scene.', inputSchema: { target: Target, operations: z.array(Op).min(1), label: z.string().optional(), dry_run: z.boolean().default(false) } },
+    async ({ target, operations, label, dry_run }) => call("scene.patch", t(target, { operations, label, dry_run })),
   );
 
-  server.registerTool(
+  tool(
     "godot_scene",
-    {
-      title: "Scene files",
-      description: "list open scenes, open a scene in the editor, save (current or all, or save_as with path), reload a scene after external edits, close the edited scene, or create a new scene file with a root class.",
-      inputSchema: {
-        action: z.enum(["list", "open", "save", "save_all", "reload", "new", "close"]),
-        path: z.string().optional(),
-        root_class: z.string().optional(),
-        name: z.string().optional(),
-      },
-    },
+    { description: "Scene files: list/open/save/save_all/reload/close/new.", inputSchema: { action: z.enum(["list", "open", "save", "save_all", "reload", "close", "new"]), path: z.string().optional(), root_class: z.string().optional(), name: z.string().optional() } },
     async ({ action, path, root_class, name }) => {
-      switch (action) {
-        case "list":
-          return call("scene.list_open");
-        case "open":
-          return call("scene.open", { path });
-        case "save":
-          return call("scene.save", path ? { path } : {});
-        case "save_all":
-          return call("scene.save", { all: true });
-        case "reload":
-          return call("scene.reload", path ? { path } : {});
-        case "close":
-          return call("scene.close", path ? { path } : {});
-        case "new":
-          return call("scene.new", { path, root_class: root_class ?? "Node", name: name ?? root_class ?? "Node" });
-      }
+      if (action === "list") return call("scene.list_open");
+      if (action === "save_all") return call("scene.save", { all: true });
+      if (action === "new") return call("scene.new", { path, root_class: root_class ?? "Node", name: name ?? root_class ?? "Node" });
+      return call(`scene.${action}`, path ? { path } : {});
     },
   );
 
-  server.registerTool(
-    "godot_selection",
-    {
-      title: "Editor selection",
-      description: "Get or set the editor's selected nodes (set also shows the first in the Inspector). Useful to point the human at what you changed.",
-      inputSchema: { action: z.enum(["get", "set"]).default("get"), refs: z.array(NodeRef).optional() },
-    },
-    async ({ action, refs }) => call("scene.selection", { action, refs: refs ?? [] }),
-  );
+  tool("godot_selection", { description: "Get/set editor selection.", inputSchema: { action: z.enum(["get", "set"]).default("get"), refs: z.array(NodeRef).optional() } }, async ({ action, refs }) => call("scene.selection", { action, refs: refs ?? [] }));
 
-  server.registerTool(
-    "godot_history",
-    {
-      title: "Undo / redo",
-      description: "Inspect the edited scene's undo history, undo or redo the last action (including your own patches and the human's edits), and list recent mutations made through the bridge with their author.",
-      inputSchema: { action: z.enum(["get", "undo", "redo", "mutations"]).default("get") },
-    },
-    async ({ action }) => (action === "mutations" ? call("bridge.history") : call("scene.history", { action })),
-  );
+  tool("godot_history", { description: "Undo/redo the edited scene; mutations = bridge edits with author.", inputSchema: { action: z.enum(["get", "undo", "redo", "mutations"]).default("get") } }, async ({ action }) => (action === "mutations" ? call("bridge.history") : call("scene.history", { action })));
 
-  server.registerTool(
-    "godot_project",
-    {
-      title: "Project settings",
-      description: "Read/write ProjectSettings keys (e.g. application/run/main_scene, physics/common/physics_ticks_per_second) or list the InputMap actions with their events.",
-      inputSchema: {
-        action: z.enum(["get", "set", "input_map"]),
-        keys: z.array(z.string()).optional(),
-        values: z.record(z.any()).optional(),
-        persist: z.boolean().default(true),
-      },
-    },
-    async ({ action, keys, values, persist }) => {
-      if (action === "input_map") return call("project.input_map");
-      return call("project.settings", { action, keys: keys ?? [], values: values ?? {}, persist });
-    },
-  );
+  tool("godot_project", { description: "ProjectSettings get/set, or input_map.", inputSchema: { action: z.enum(["get", "set", "input_map"]), keys: z.array(z.string()).optional(), values: z.record(z.any()).optional(), persist: z.boolean().default(true) } }, async ({ action, keys, values, persist }) => (action === "input_map" ? call("project.input_map") : call("project.settings", { action, keys: keys ?? [], values: values ?? {}, persist })));
 
-  server.registerTool(
-    "godot_validate",
-    {
-      title: "Validate scripts",
-      description: "Compile GDScript files fresh inside the editor and return parser/analyzer diagnostics captured from the engine log (all .gd files when paths is empty). Run after editing scripts.",
-      inputSchema: { paths: z.array(z.string()).default([]) },
-    },
-    async ({ paths }) => call("validate.scripts", { paths }, 120000),
-  );
+  tool("godot_validate", { description: "Compile .gd files in the editor; returns diagnostics with file:line.", inputSchema: { paths: z.array(z.string()).default([]) } }, async ({ paths }) => call("validate.scripts", { paths }, 120000));
 
-  server.registerTool(
+  tool(
     "godot_run",
-    {
-      title: "Run / stop / pause the game",
-      description:
-        "start the main, current or a specific scene from the editor (waits for the game to connect to the hub and returns its run id), stop it, list runs, pause/resume the SceneTree, set Engine.time_scale, or change_scene inside the running game.",
-      inputSchema: {
-        action: z.enum(["start", "stop", "list", "pause", "resume", "time_scale", "change_scene"]),
-        scene: z.enum(["main", "current"]).default("main"),
-        path: z.string().optional().describe("res://... scene for start (overrides scene) or change_scene"),
-        run_id: z.string().optional(),
-        scale: z.number().optional(),
-        wait_ms: z.number().int().default(8000),
-      },
-    },
+    { description: "start/stop/list game runs; pause/resume/time_scale/change_scene a run.", inputSchema: { action: z.enum(["start", "stop", "list", "pause", "resume", "time_scale", "change_scene"]), scene: z.enum(["main", "current"]).default("main"), path: z.string().optional(), run_id: z.string().optional(), scale: z.number().optional(), wait_ms: z.number().int().default(8000) } },
     async ({ action, scene, path, run_id, scale, wait_ms }) => {
-      const game = run_id ?? "game";
-      switch (action) {
-        case "start":
-          return call("run.start", { scene: path ?? scene, path, wait_ms }, wait_ms + 5000);
-        case "stop":
-          return call("run.stop");
-        case "list":
-          return call("run.list");
-        case "pause":
-          return call("run.pause", { target: game, paused: true });
-        case "resume":
-          return call("run.pause", { target: game, paused: false });
-        case "time_scale":
-          return call("run.time_scale", { target: game, scale: scale ?? 1 });
-        case "change_scene":
-          return call("run.change_scene", { target: game, path });
-      }
+      const g = run_id ?? "game";
+      if (action === "start") return call("run.start", { scene: path ?? scene, path, wait_ms }, wait_ms + 5000);
+      if (action === "stop") return call("run.stop");
+      if (action === "list") return call("run.list");
+      if (action === "pause" || action === "resume") return call("run.pause", { target: g, paused: action === "pause" });
+      if (action === "time_scale") return call("run.time_scale", { target: g, scale: scale ?? 1 });
+      return call("run.change_scene", { target: g, path });
     },
   );
 
-  server.registerTool(
+  tool(
     "godot_step",
-    {
-      title: "Step the running game",
-      description:
-        "Cooperative frame stepping: (deliver events) unpause, run N process or physics frames, pause again. Reports requested vs observed process/physics frames (honest: physics may tick 0..n per frame; process_mode ALWAYS nodes keep running while paused). Optionally capture an observation right after.",
-      inputSchema: {
-        run_id: z.string().optional(),
-        count: z.number().int().min(1).max(100000).default(1),
-        clock: z.enum(["process", "physics"]).default("physics"),
-        events: z.array(z.record(z.any())).default([]).describe("Input events (same format as godot_input) delivered in the first stepped frame; use this instead of godot_input while paused"),
-        capture: z.object({ mode: z.enum(["viewport", "camera_preview", "camera_takeover"]).default("viewport"), camera: NodeRef.optional(), width: z.number().int().default(960), height: z.number().int().default(540) }).optional(),
-      },
-    },
-    async ({ run_id, count, clock, events, capture }) => {
+    { description: "Run N frames then pause; reports observed frames. events are delivered in the first frame (use instead of godot_input while paused).", inputSchema: { run_id: z.string().optional(), count: z.number().int().min(1).max(100000).default(1), clock: z.enum(["process", "physics"]).default("physics"), events: z.array(Ev).default([]), capture: z.object({ mode: z.enum(["viewport", "camera_preview", "camera_takeover"]).default("viewport"), camera: NodeRef.optional(), width: z.number().int().default(640), height: z.number().int().default(360), format: z.enum(["jpeg", "png"]).default("jpeg") }).optional() } },
+    async ({ run_id, ...rest }) => {
       try {
-        const r = await hub.request("run.step", { target: run_id ?? "game", count, clock, events, capture }, 120000);
-        const content: any[] = [];
+        const r = await hub.request("run.step", { target: run_id ?? "game", ...rest }, 120000);
         if (r.observation?.image) {
-          content.push({ type: "image", data: r.observation.image.base64, mimeType: r.observation.image.mime });
-          r.observation.image = { width: r.observation.image.width, height: r.observation.image.height };
+          const { observation, ...others } = r;
+          return imageResult(observation, others);
         }
-        content.push(text(r));
-        return { content };
+        return { content: [text(r)] };
       } catch (e) {
         return errorResult(e);
       }
     },
   );
 
-  server.registerTool(
+  tool(
     "godot_input",
-    {
-      title: "Inject input into the game",
-      description:
-        'Send input events to the running game through Input.parse_input_event (reach _input/_unhandled_input and action state). Event types: {type:"action", action, pressed?, strength?, hold_ms?}, {type:"key", key:"Space"|"A"|"Escape", pressed?, hold_ms?, shift?, ctrl?}, {type:"mouse_button", button:1, position:[x,y], pressed?, hold_ms?}, {type:"mouse_motion", position:[x,y], relative:[dx,dy]}. hold_ms presses then releases. release_all releases everything the bridge pressed. While the game is paused use godot_step with events instead.',
-      inputSchema: {
-        run_id: z.string().optional(),
-        events: z.array(z.record(z.any())).default([]),
-        release_all: z.boolean().default(false),
-      },
-    },
-    async ({ run_id, events, release_all }) => {
-      const target = run_id ?? "game";
-      if (release_all) return call("input.release_all", { target });
-      return call("input.send", { target, events }, 60000);
-    },
+    { description: 'Inject input into the running game. events: {type:action,action,pressed?,hold_ms?} {type:key,key:"Space",pressed?} {type:mouse_button,button,position:[x,y]} {type:mouse_motion,position,relative}.', inputSchema: { run_id: z.string().optional(), events: z.array(Ev).default([]), release_all: z.boolean().default(false) } },
+    async ({ run_id, events, release_all }) => (release_all ? call("input.release_all", { target: run_id ?? "game" }) : call("input.send", { target: run_id ?? "game", events }, 60000)),
   );
 
-  server.registerTool(
-    "godot_call",
-    {
-      title: "Call a node method",
-      description: "Call any method on a node (editor scene or running game) with JSON args and get the encoded return value. Not undoable.",
-      inputSchema: { target: Target, ref: NodeRef, method: z.string(), args: z.array(z.any()).default([]) },
-    },
-    async ({ target, ref, method, args }) => call("scene.call", withTarget(target, { ref, method, args })),
-  );
+  tool("godot_call", { description: "Call a node method with JSON args.", inputSchema: { target: Target, ref: NodeRef, method: z.string(), args: z.array(z.any()).default([]) } }, async ({ target, ref, method, args }) => call("scene.call", t(target, { ref, method, args })));
 
-  server.registerTool(
-    "godot_exec",
-    {
-      title: "Execute GDScript",
-      description:
-        "Escape hatch: hot-compile and run GDScript inside the editor or the running game. source is the body of `func run(ctx, args)` (ctx.root = scene root, ctx.tree = SceneTree, ctx.editor = bool) or a full script defining run(). No sandbox and no timeout on infinite loops: prefer structured tools. Compile errors show up in godot_logs.",
-      inputSchema: { target: Target, source: z.string(), args: z.record(z.any()).default({}) },
-    },
-    async ({ target, source, args }) => call("exec.gdscript", withTarget(target, { source, args }), 120000),
-  );
+  tool("godot_exec", { description: "Run GDScript in-process (body of run(ctx,args)). Off unless project setting godot_bridge/allow_exec; no sandbox/timeout.", inputSchema: { target: Target, source: z.string(), args: z.record(z.any()).default({}) } }, async ({ target, source, args }) => call("exec.gdscript", t(target, { source, args }), 120000));
 
-  server.registerTool(
+  tool(
     "godot_logs",
-    {
-      title: "Engine logs & errors",
-      description:
-        "Output, warnings, errors and script errors (with file/line/backtrace) captured by an OS Logger in the editor or the game. Use after (cursor = last_seq) to read only new entries; levels filters (info, warning, error, script_error, shader_error).",
-      inputSchema: {
-        target: Target,
-        after: z.number().int().default(0),
-        levels: z.array(z.enum(["info", "warning", "error", "script_error", "shader_error"])).default([]),
-        text: z.string().default(""),
-        limit: z.number().int().default(200),
-        clear: z.boolean().default(false),
-      },
-    },
-    async ({ target, after, levels, text: t, limit, clear }) => (clear ? call("logs.clear", withTarget(target, {})) : call("logs.get", withTarget(target, { after, levels, text: t, limit }))),
+    { description: "Engine output/errors with file:line. after=last_seq for new entries only.", inputSchema: { target: Target, after: z.number().int().default(0), levels: z.array(z.enum(["info", "warning", "error", "script_error", "shader_error"])).default([]), text: z.string().default(""), limit: z.number().int().default(100), clear: z.boolean().default(false) } },
+    async ({ target, after, levels, text: q, limit, clear }) => (clear ? call("logs.clear", t(target, {})) : call("logs.get", t(target, { after, levels, text: q, limit }))),
   );
 
-  server.registerTool(
-    "godot_metrics",
-    {
-      title: "Performance monitors",
-      description: "Engine counters from the running game (fps, process/physics time, draw calls, primitives, video memory, object/node counts, physics active objects) plus custom monitors. Not a per-function profiler.",
-      inputSchema: { run_id: z.string().optional(), monitors: z.array(z.string()).default([]) },
-    },
-    async ({ run_id, monitors }) => call("metrics.get", { target: run_id ?? "game", monitors }),
-  );
+  tool("godot_metrics", { description: "Performance monitors of the running game.", inputSchema: { run_id: z.string().optional(), monitors: z.array(z.string()).default([]) } }, async ({ run_id, monitors }) => call("metrics.get", { target: run_id ?? "game", monitors }));
 
-  server.registerTool(
-    "godot_lease",
-    {
-      title: "Write lease (multi-agent)",
-      description:
-        "Coordination when several agents (e.g. Claude and Codex) share one editor: mutations auto-acquire a 30 s write lease per target; another live holder causes CONFLICT. acquire/renew, release when done with a batch, steal only if the holder is stuck, get to see holders.",
-      inputSchema: { action: z.enum(["get", "acquire", "renew", "release", "steal"]).default("get"), target: z.string().default("editor"), ttl_ms: z.number().int().default(30000) },
-    },
-    async ({ action, target, ttl_ms }) => call("bridge.lease", { action, target, ttl_ms }),
-  );
+  tool("godot_lease", { description: "Write lease per target for multi-agent use: get/acquire/renew/release/steal.", inputSchema: { action: z.enum(["get", "acquire", "renew", "release", "steal"]).default("get"), target: z.string().default("editor"), ttl_ms: z.number().int().default(30000) } }, async ({ action, target, ttl_ms }) => call("bridge.lease", { action, target, ttl_ms }));
 }

@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { HubClient } from "../bridge/dist/hub.js";
+import WebSocket from "../bridge/node_modules/ws/index.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const project = path.join(here, "project");
@@ -57,6 +58,7 @@ await step("agent B connects (two agents at once)", async () => {
   assert.equal(st.clients.length, 2);
 });
 await step("status shows edited scene", async () => {
+  await a.request("scene.open", { path: "res://main.tscn" });
   const st = await a.request("bridge.status");
   assert.equal(st.edited_scene.path, "res://main.tscn");
   assert.equal(st.capabilities.logger, true);
@@ -80,14 +82,24 @@ await step("scene.tree / find / inspect / cameras", async () => {
   const t = await a.request("scene.tree", { depth: 3, props: ["position"] });
   assert.equal(t.root.name, "Main");
   assert.ok(!("abs_path" in t.root), "editor-internal abs paths must be hidden");
+  assert.equal(t.class_counts.Camera3D, 2);
+  assert.equal(t.total_nodes, 12);
+  const ex = await a.request("scene.tree", { exclude_classes: ["CollisionShape3D", "Camera3D"] });
+  assert.equal(ex.excluded, 4);
+  assert.ok(!ex.root.children_nodes.some((n) => n.class === "Camera3D"));
+  const capped = await a.request("scene.tree", { max_nodes: 3 });
+  assert.equal(capped.truncated, true);
+  assert.ok(capped.hint);
   const player = t.root.children_nodes.find((n) => n.name === "Player");
   assert.equal(player.script, "res://player.gd");
   playerId = player.id;
   const f = await a.request("scene.find", { class_name: "Camera3D" });
   assert.equal(f.nodes.length, 2);
-  const i = await a.request("scene.inspect", { refs: [{ id: playerId }], methods: true });
+  const i = await a.request("scene.inspect", { refs: [{ id: playerId }], methods: true, signals: true });
   const node = i.nodes[0];
   assert.equal(node.properties.speed, 4.5);
+  assert.ok(!("property_meta" in node), "meta off by default");
+  assert.ok(!("process_mode" in node.properties), "changed_only by default hides defaults");
   assert.ok(node.methods.some((m) => m.name === "greet"));
   assert.ok(node.signals.some((s) => s.name === "jumped"));
   const c = await a.request("scene.cameras");
@@ -95,8 +107,12 @@ await step("scene.tree / find / inspect / cameras", async () => {
   assert.ok(c.cameras.some((cam) => cam.kind === "2d"));
 });
 await step("scene.patch is validated (dry_run) and rejects bad refs", async () => {
-  const r = await a.request("scene.patch", { dry_run: true, operations: [{ op: "set_property", ref: "Player", property: "speed", value: 9 }] });
+  const r = await a.request("scene.patch", { dry_run: true, operations: [{ op: "set_property", ref: "Player", property: "speed", value: 9 }, { op: "create_node", parent: ".", class_name: "Node3D", name: "Tmp" }] });
   assert.equal(r.valid, true);
+  assert.equal(r.operations[0].op, "set_property");
+  assert.equal(r.operations[1].node.name, "Tmp");
+  const after = await a.request("scene.tree", { depth: 1 });
+  assert.ok(!after.root.children_nodes.some((n) => n.name === "Tmp"), "dry_run must not add nodes");
   await assert.rejects(a.request("scene.patch", { operations: [{ op: "set_property", ref: "Nope", property: "speed", value: 9 }] }), (e) => e.code === "NOT_FOUND");
 });
 await step("scene.patch applies, undo/redo works", async () => {
@@ -149,9 +165,13 @@ await step("scene.save writes the .tscn and remove_node undo restores it", async
   assert.ok(!m.nodes[0].error);
   await a.request("scene.open", { path: "res://main.tscn" });
 });
-await step("exec.gdscript runs in the editor and errors are captured by the logger", async () => {
+await step("exec.gdscript (enabled in this test project) runs and reports sandbox=none", async () => {
+  assert.equal(a.hello.capabilities.exec, true, "tests/project sets godot_bridge/allow_exec=true");
   const r = await a.request("exec.gdscript", { source: "return ctx.root.get_child_count() + args.n", args: { n: 10 } });
   assert.equal(r.result, 16);
+  assert.equal(r.sandbox, "none");
+  const slow = await a.request("exec.gdscript", { source: "OS.delay_msec(30); return 1", soft_limit_ms: 10 });
+  assert.ok(slow.warning, "soft limit warning");
   const before = (await a.request("logs.get", { limit: 1 })).last_seq;
   await a.request("exec.gdscript", { source: 'push_error("bridge-test-error"); print("bridge-test-print"); return 1' });
   const logs = await a.request("logs.get", { after: before });
@@ -238,6 +258,32 @@ await step("runtime: patch (no undo) + metrics + spatial bounds + exec", async (
 await step("runtime: lease conflict is enforced through the hub for game targets", async () => {
   await assert.rejects(b.request("run.step", { target: "game", count: 1 }), (e) => e.code === "CONFLICT");
 });
+await step("target=game with two instances -> AMBIGUOUS; explicit run_id still works", async () => {
+  const d = JSON.parse(fs.readFileSync(discovery, "utf8"));
+  const fake = new WebSocket(d.url);
+  await new Promise((r) => fake.on("open", r));
+  fake.send(JSON.stringify({ jsonrpc: "2.0", id: "h", method: "bridge.hello", params: { client: "fake-run", role: "runtime", token: d.token, run_id: "run-99999", pid: 99999, scene: "x" } }));
+  await new Promise((r) => fake.once("message", r));
+  await assert.rejects(a.request("scene.tree", { target: "game", depth: 1 }), (e) => e.code === "AMBIGUOUS" && e.data.runs.length === 2);
+  const ok = await a.request("scene.tree", { target: run.run_id, depth: 1 });
+  assert.equal(ok.root.name, "Main");
+  fake.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const st = await a.request("bridge.status");
+  assert.equal(st.runs.length, 1);
+});
+await step("bad token is refused", async () => {
+  const d = JSON.parse(fs.readFileSync(discovery, "utf8"));
+  const ws = new WebSocket(d.url);
+  await new Promise((r) => ws.on("open", r));
+  ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "bridge.hello", params: { client: "intruder", token: "nope" } }));
+  const reply = JSON.parse((await new Promise((r) => ws.once("message", r))).toString());
+  assert.match(reply.error.message, /UNAUTHORIZED/);
+  ws.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "scene.tree", params: {} }));
+  const reply2 = JSON.parse((await new Promise((r) => ws.once("message", r))).toString());
+  assert.match(reply2.error.message, /UNAUTHORIZED/);
+  ws.close();
+});
 await step("run.stop ends the game and the run disappears", async () => {
   await a.request("run.stop");
   for (let i = 0; i < 40; i++) {
@@ -248,6 +294,25 @@ await step("run.stop ends the game and the run disappears", async () => {
   const st = await a.request("bridge.status");
   assert.equal(st.runs.length, 0);
 });
+
+const runInert = (label, extraArgs = []) =>
+  step(`runtime is inert outside the editor (${label})`, async () => {
+    const out = await new Promise((resolve) => {
+      const p = spawn(godot, ["--headless", "--path", project, "--quit-after", "5", ...extraArgs], { stdio: ["ignore", "pipe", "pipe"] });
+      let buf = "";
+      p.stdout.on("data", (d) => (buf += d));
+      p.stderr.on("data", (d) => (buf += d));
+      p.on("exit", () => resolve(buf));
+    });
+    assert.ok(!/GodotBridge/.test(out), "no bridge output: " + out);
+    assert.ok(!/ERROR|SCRIPT ERROR/.test(out), "no errors: " + out);
+  });
+await runInert("editor binary, --headless --path, no F5");
+await runInert("env/flags cannot enable it", ["--", "--godot-bridge"]);
+const core = path.join(project, "addons", "godot_bridge", "core");
+fs.renameSync(core, core + ".off");
+await runInert("addon core excluded like in an export");
+fs.renameSync(core + ".off", core);
 
 console.log(`\n${passed} steps passed`);
 a.close();
