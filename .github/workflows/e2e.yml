@@ -1,0 +1,16 @@
+name: e2e
+on: [push, pull_request]
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Godot 4.5 headless
+        run: |
+          curl -sSL -o godot.zip https://github.com/godotengine/godot/releases/download/4.5-stable/Godot_v4.5-stable_linux.x86_64.zip
+          unzip -q godot.zip && chmod +x Godot_v4.5-stable_linux.x86_64
+      - name: Build + e2e
+        run: GODOT=$PWD/Godot_v4.5-stable_linux.x86_64 tests/run_e2e.sh

@@ -1,0 +1,8 @@
+node_modules/
+bridge/dist/
+tests/project/.godot/
+tests/project/main_saved.tscn
+tests/project/*.uid
+*.png
+.DS_Store
+.cache/

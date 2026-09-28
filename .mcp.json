@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "godot": {
+      "command": "node",
+      "args": ["bridge/dist/cli.js", "mcp", "--project", "tests/project", "--client", "claude"]
+    }
+  }
+}
