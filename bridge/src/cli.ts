@@ -5,6 +5,7 @@ import { HubClient, BridgeError } from "./hub.js";
 import { runMcp } from "./mcp.js";
 import { install, codexToml } from "./install.js";
 import { findProjectDir, readDiscovery, pidAlive, DISCOVERY_REL } from "./discovery.js";
+import { buildConsultPrompt, runCodex } from "./consult.js";
 
 const USAGE = `godot-bridge <command> [options]
 
@@ -17,6 +18,7 @@ Commands:
   methods                     List hub methods
   snapshot [--game]           Tree + cameras + recent errors as JSON (context bundle for another agent)
   observe [--out f.png] [--camera ref] [--mode m] [--game]   Save a render to a file
+  consult "<brief>" [--game] [--model m] [--print]           Ask Codex (codex exec, high reasoning) with a live snapshot attached
 
 Options:
   --project <dir>   Godot project directory (default: GODOT_PROJECT or walk up from cwd)
@@ -67,6 +69,17 @@ async function main() {
     case "doctor":
       await doctor(hubOpts);
       return;
+    case "consult": {
+      const brief = positional.slice(1).join(" ");
+      if (!brief) throw new Error('usage: godot-bridge consult "<brief for codex>" [--game] [--model m] [--print]');
+      const prompt = await buildConsultPrompt(brief, { projectDir, game: args.game === true });
+      if (args.print === true) {
+        console.log(prompt);
+        return;
+      }
+      const dir = findProjectDir(projectDir) ?? process.cwd();
+      process.exit(await runCodex(prompt, { model: typeof args.model === "string" ? args.model : process.env.CODEX_MODEL ?? "gpt-5", cwd: dir }));
+    }
     case "status":
     case "methods":
     case "call":

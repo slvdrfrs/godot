@@ -29,7 +29,7 @@ node dist/cli.js install --project /ruta/a/tu/proyecto --write-codex
 ```
 
 `install` copia el addon a `addons/godot_bridge`, lo activa en `project.godot`, escribe `.mcp.json` (Claude Code) y la sección
-`[mcp_servers.godot]` en `~/.codex/config.toml` (Codex). Abre el proyecto en **Godot 4.5** (4.3+ funciona sin captura de logs).
+`[mcp_servers.godot]` en `~/.codex/config.toml` (Codex). Abre el proyecto en **Godot 4.5 o superior** (validado en 4.5 y 4.7.2; 4.3/4.4 funcionan sin captura de logs).
 El panel inferior **Bridge** muestra el puerto y los agentes conectados. Comprueba con `node dist/cli.js doctor --project ...`.
 
 Sin `--write-codex`, el comando imprime el TOML para pegarlo a mano. Claude y Codex pueden estar conectados **a la vez**.
@@ -45,7 +45,7 @@ Todas aceptan `target: "editor" | "game"`; las mismas tools sirven para la escen
 
 ## Modo pair (Claude + Codex)
 
-`AGENTS.md` (Codex) y `CLAUDE.md` (Claude) describen el mismo flujo. El skill `/godot-pair` y `scripts/codex-consult.sh`
+`AGENTS.md` (Codex) y `CLAUDE.md` (Claude) describen el mismo flujo. El skill `/godot-pair` y `godot-bridge consult "<brief>"`
 envían a Codex un brief con un snapshot vivo del editor (árbol, cámaras, errores) y devuelven su plan para fusionarlo.
 Ambos agentes comparten el editor con *write leases* de 30 s por objetivo: quien edita tiene el lease, el otro lee.
 
@@ -56,7 +56,7 @@ GODOT=/ruta/Godot_v4.5 tests/run_e2e.sh
 ```
 
 Arranca un editor headless sobre `tests/project`, conecta dos agentes, edita/deshace/guarda, lanza el juego headless,
-lo pausa, avanza frames, inyecta input, lee logs y métricas, y lo para. 21 pasos. CI en `.github/workflows/e2e.yml`.
+lo pausa, avanza frames, inyecta input, lee logs y métricas, y lo para. 21 pasos, en verde con Godot 4.5 y 4.7.2. CI en `.github/workflows/e2e.yml`.
 
 ## Qué NO garantiza (léelo)
 
@@ -66,4 +66,5 @@ lo pausa, avanza frames, inyecta input, lee logs y métricas, y lo para. 21 paso
 - `godot_exec` no tiene sandbox ni timeout. Desactívalo con `godot_bridge/allow_exec = false` en Project Settings.
 - El runtime está inerte en exports salvo `GODOT_BRIDGE=1` o `--godot-bridge`.
 
+Windows + Godot 4.7.2 paso a paso con rutas reales: [`docs/WINDOWS.md`](docs/WINDOWS.md).
 Protocolo interno: [`docs/PROTOCOL.md`](docs/PROTOCOL.md). Plan fusionado Claude + Codex: [`docs/PLAN.md`](docs/PLAN.md).

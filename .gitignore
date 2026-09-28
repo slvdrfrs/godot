@@ -1,6 +1,7 @@
 node_modules/
 bridge/dist/
 tests/project/.godot/
+tests/project/addons/
 tests/project/main_saved.tscn
 tests/project/*.uid
 *.png

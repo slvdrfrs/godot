@@ -13,6 +13,9 @@ const project = path.join(here, "project");
 const godot = process.env.GODOT ?? "godot";
 const discovery = path.join(project, ".godot", "godot_bridge.json");
 if (fs.existsSync(discovery)) fs.rmSync(discovery);
+// The test project gets a fresh copy of the addon (no symlinks: Windows-safe).
+fs.rmSync(path.join(project, "addons"), { recursive: true, force: true });
+fs.cpSync(path.join(here, "..", "addons"), path.join(project, "addons"), { recursive: true });
 
 const editor = spawn(godot, ["--headless", "--editor", "--path", project], { stdio: ["ignore", "pipe", "pipe"] });
 let editorLog = "";

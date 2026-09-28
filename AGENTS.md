@@ -32,5 +32,5 @@ If the tools are missing, run `node bridge/dist/cli.js doctor --project <dir>`.
 ## Pair mode (Claude + Codex)
 
 Claude Code usually drives (plans, edits through the bridge, runs the game) and asks Codex for an independent review or a
-second implementation attempt with `scripts/codex-consult.sh`, which bundles a live snapshot (tree, cameras, diagnostics)
+second implementation attempt with `node bridge/dist/cli.js consult "<brief>"`, which bundles a live snapshot (tree, cameras, diagnostics)
 into the prompt. Codex can do the same in reverse: it has the same tools. Whoever holds the write lease is the driver.

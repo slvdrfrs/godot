@@ -10,8 +10,9 @@ description: Pair with Codex CLI on a Godot task through the Godot Bridge. Use w
 2. Write the question for Codex as a self-contained brief: the goal, the constraints, what you already verified, and what you
    want back (a plan, a critique of your plan, or an alternative implementation). Ask for structured headings so the answer
    can be merged.
-3. Run `scripts/codex-consult.sh "<brief>"` from the repo root. It appends a live snapshot (`godot-bridge snapshot`: tree, cameras,
-   diagnostics, and `--game` runtime state when a run is active) and calls `codex exec` with high reasoning in read-only sandbox.
+3. Run `node bridge/dist/cli.js consult "<brief>" --project <dir>` (or `scripts/codex-consult.sh` on Unix). It appends a live
+   snapshot (tree, cameras, diagnostics, and `--game` runtime state when a run is active) and calls `codex exec` with high
+   reasoning in a read-only sandbox.
    If `codex` is not installed or not logged in, the script prints the exact prompt so the user can paste it into Codex
    themselves; say so and continue with your own plan in the meantime.
 4. Merge: adopt what is verifiably better (check claims against `godot_api` and a quick `godot_exec`/`godot_step` experiment when
